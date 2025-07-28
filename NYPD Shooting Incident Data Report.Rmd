@@ -1,0 +1,277 @@
+---
+title: "**Gun Violence in New York City**"
+subtitle: "*An Introductory Analysis of Shooting Incidents in America's Big Apple*"
+author: "K. Sundin"
+date: "2025-07-19"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tinytex)
+library(tidycensus)
+library(lubridate)
+library(ggplot2)
+library(sf)
+library(sfheaders)
+library(nycgeo)
+library(blsR)
+```
+
+**Abstract** The following report intends to interpret New York Police Department (NYPD) data regarding shooting incidents in New York City (NYC) between the years 2006 and 2024. The data was collected from the data.gov repository and details every shooting incident recorded at the NYPD over this time and is reviewed by the Office of Management Analysis and Planning prior to being published; however, according to source footnotes, this data should be considered a close approximation of current records due to revisions and updates that may occur after the date in which the information was queried from the system of record. Additionally, some geographic information regarding the location of occurrence may be inaccurate or missing (such as in the case of an invalid recorded address), or otherwise consolidated for purposes of geo-coding (for example, all incidents occurring within the jurisdiction of the Department of Corrections have been coded as occurring on Riker's Island regardless of the specific correctional facility in which the incident occurred). Full details on the nature of and specific alterations within the source data can be found on the City of New York's website in the associated footnotes (https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8/about_data). These notes should be fully considered and properly assessed in any third party interpretation of the following results before drawing specific conclusions.  
+
+Additionally, it should be noted that attempts to recreate the following analysis will require a Census API key and may, depending on number of times run, require a BLS API key. Both may be obtained quickly and for free at the appropriate source webpages.  
+
+```{r, message=FALSE}
+#Step 1: Import relevant data set.
+nypd_data <- read.csv("~/Education/MS-DS/Vital Skills/DSTA 5301/NYPD_Shooting_Incident_Data__Historic.csv")
+nypd_data$Year <- format(as.Date(nypd_data$OCCUR_DATE, format = "%m/%d/%Y"),"%Y")
+nypd_data <- nypd_data %>%
+  mutate(Year = as.numeric(Year))
+
+#Step 2: Create new data frames with views of interest for later analysis.
+
+#Data frame counting incidents by year:
+nypd_data_year <- nypd_data %>%
+  group_by(Year, STATISTICAL_MURDER_FLAG) %>%
+  summarise(count = n())
+nypd_data_percent <- nypd_data_year %>%
+  group_by(Year) %>%
+  summarize(total = sum(count)) %>%
+  full_join(nypd_data_year)
+nypd_data_percent$Percent_Fatality <- nypd_data_percent$count/nypd_data_percent$total
+
+#Data frame consisting only of those shooting incidents in which there were multiple victims:
+multiple_vics <- nypd_data[duplicated(nypd_data$INCIDENT_KEY) | duplicated(nypd_data$INCIDENT_KEY, fromLast = TRUE), ]
+
+multi_vics_year <- multiple_vics %>%
+  group_by(Year, STATISTICAL_MURDER_FLAG) %>%
+  summarise(count = n())
+multi_vics_percent <- multi_vics_year %>%
+  group_by(Year) %>%
+  summarize(total = sum(count)) %>%
+  full_join(multi_vics_year)
+multi_vics_percent$Percent_Fatality <- multi_vics_percent$count/multi_vics_percent$total
+
+#Data frame counting incidents by borough:
+nypd_data_boro <- nypd_data %>%
+  group_by(BORO) %>%
+  summarise(count = n()) %>%
+  rename(borough_name = "BORO")
+nypd_data_boro$borough_name[nypd_data_boro$borough_name=="BRONX"] <- "Bronx"
+nypd_data_boro$borough_name[nypd_data_boro$borough_name=="BROOKLYN"] <- "Brooklyn"
+nypd_data_boro$borough_name[nypd_data_boro$borough_name=="MANHATTAN"] <- "Manhattan"
+nypd_data_boro$borough_name[nypd_data_boro$borough_name=="QUEENS"] <- "Queens"
+nypd_data_boro$borough_name[nypd_data_boro$borough_name=="STATEN ISLAND"] <- "Staten Island"
+
+#Converting Latitude and Longitude to Census Tract IDs:
+tracts <- get_acs(
+  geography = "tract",
+  state = "NY",
+  year = 2023,
+  variables = "B01001_001",
+  geometry = TRUE)
+
+points_df <- nypd_data %>%
+  select(c("Latitude", "Longitude")) %>%
+  na.omit(points_df)
+points_sf <- st_as_sf(points_df, coords = c("Longitude", "Latitude"), crs = 4269)
+points_tracts <- st_join(points_sf, tracts) %>%
+  select("GEOID", "geometry")
+
+nypd_data_tracts <- nypd_data %>%
+  select(c("INCIDENT_KEY", "OCCUR_DATE", "BORO", "STATISTICAL_MURDER_FLAG", "Latitude", "Longitude", "Year"))
+nypd_data_tracts <- nypd_data_tracts %>%
+  na.omit(nypd_data$Latitude) %>%
+  na.omit(nypd_data$Longitude)
+nypd_data_tracts <- st_as_sf(nypd_data_tracts, coords = c("Longitude", "Latitude"), crs = 4269)
+nypd_data_tracts <- nypd_data_tracts %>%
+  st_join(points_tracts)
+```
+
+### **Shooting Incidents in NYC**  
+The following includes a variety of charts for the purpose of visualizing shooting incidents in NYC between the 2006 and 2024 calendar years. For purposes of this section, unless explicitly stated otherwise, "total incidents" will be treated as "total victims" (i.e., singular incidents sharing the same incident key but for which there was more than one victim will be treated as more than one incident).
+```{r, message=FALSE, warning=FALSE}
+#% fatalities by year
+total_fatality <- ggplot(nypd_data_percent, aes(x=Year, y=count, fill=STATISTICAL_MURDER_FLAG)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(y=count, label=paste0(count,"\n",scales::percent(Percent_Fatality, accuracy = 0.1))), color="black", position=position_stack(vjust=0.99), vjust=0.3, size=2.25) +
+  ylab("Incidents") +
+  scale_fill_brewer(labels=c("Non-fatal", "Fatal"), palette="Set2") +
+  labs(title="Fatality of All Incidents by Year") +
+  guides(fill=guide_legend(title="Incident Lethality"))
+
+#incidents with multiple victims
+multi_vic <- ggplot(multi_vics_percent, aes(x=Year, y=count, fill=STATISTICAL_MURDER_FLAG)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(y=count, label=paste0(count,"\n",scales::percent(Percent_Fatality, accuracy = 0.1))), color="black", position=position_stack(vjust=0.99), vjust=0.3, size=2.25) +
+  ylab("Incidents") +
+  scale_fill_brewer(labels=c("Non-fatal", "Fatal"), palette="Set2") +
+  labs(title="Fatality of Mult-victim Incidents by Year") +
+  guides(fill=guide_legend(title="Incident Lethality"))
+
+#incidents by Census Tract:
+nypd_data_tracts <- nypd_data_tracts %>%
+  group_by(GEOID) %>%
+  summarise(count = n()) %>%
+  rename(geoid = "GEOID")
+
+by_tract <- nyc_boundaries(geography = "puma")
+by_tract_sf <- st_as_sf(by_tract) %>%
+  st_transform(by_tract_sf, crs = 4269)
+
+by_tract_sf <- by_tract_sf %>%
+  st_join(nypd_data_tracts)
+
+by_tract_summary <- by_tract_sf %>%
+  select("puma_id", "count") %>%
+  group_by(puma_id) %>%
+  summarise(count = sum(count))
+
+boro_names <- nycgeo::borough_sf
+
+by_tract_map <- ggplot(by_tract_summary) +
+  geom_sf(aes(fill=count)) +
+  geom_sf_text(data=boro_names, mapping = aes(label = borough_name), fontface = "bold", color = "white", size = 3) +
+  scale_fill_viridis_c(name = "Total Incidents", option = "inferno") +
+  theme_void() +
+  theme(panel.grid = element_line(color = "transparent"),
+        panel.background = element_rect(fill = "gray60")) +
+  labs(title = "Total Incidents by PUMA")
+
+total_fatality
+multi_vic
+by_tract_map
+```
+
+### **An Observational Theory: The Relationship Between Gun Violence & Economic Prosperity**  
+Upon evaluation of the above information, a few key interpretations can be noted:  
+1. ***No conclusion can nor should be drawn regarding the general safety of specific neighborhoods.*** Without appropriate census data regarding the population of NYC, it is both impossible and irresponsible to assume any particular area is more vulnerable nor more aggressive than another based on this analysis alone. The number of victims may very well be a function of population density, which was not considered as part of this analysis.  
+2. ***Rates of fatality in all incidents appear consistent relative to total incidents, but multi-victim incidents tend to be more lethal.*** Both the ratio of all incidents that result in fatality as well as the ratio of multi-victim incidents that result in fatality remain largely stable over time; however, the rate of fatality in multi-victim incidents tends to be higher than that of all incidents, implying higher rates of fatality in multi-victim incidents compared to incidents with a single victim.  
+3. ***Incidents appear to rise during periods of economic downfall, and subsequently drop during periods of economic prosperity.*** Looking at the above data, perhaps the most interesting is the direct correlation of elevated incidents of gun violence in years of economic stress; particularly of note, the period leading up to and over the 2008 recession as well as the first years of the COVID-19 pandemic appear to have elevated rates of gun-related incidents, whereas the period of 2012-2019 (broadly regarded as the strongest period of what is the longest recorded period of economic expansion in US history) as well as the years following the COVID-19 pandemic show rapid decline in this violence. For this reason, the remainder of this analysis will focus on whether a reasonable correlation can be drawn between gun violence and economic prosperity.  
+
+#### **Data Collection**  
+
+The following includes economic data sourced from the Federal Bureau of Labor Statistics (BLS) and imported through the blsR package. Data is specific to New York City, unless explicitly stated otherwise.  
+
+**Definitions**  
+***Unemployment Rate:*** the percent of the NYC population currently unemployed but actively seeking employment for 3 months or more.  
+
+***Labor Force Participation Rate:*** the percent of the NYC population currently employed or actively seeking employment relative to the total NYC population.  
+
+***Consumer Price Index (CPI):*** the estimated average cost for a consumer to purchase a basket of staple goods in a particular area. For purposes of this analysis, since CPIs are not tracked at the city or individual state level, the closest proxy regional CPI was used and includes New York, New Jersey, and Pennsylvania.
+
+```{r, message=FALSE, warning=FALSE}
+#Step 1: import relevant data sets (note: API has 10 year data limit, so two tables are ran and joined)
+
+#NYC Monthly Unemployment Rate:
+unemployment_1 <- get_series_table("LASCT365100000000003", start_year=2005, end_year=2014)
+unemployment_2 <- get_series_table("LASCT365100000000003", start_year=2015, end_year=2024)
+unemployment <- unemployment_1 %>%
+  full_join (unemployment_2) %>%
+  rename(unemployment_rate = "value",
+         month = "period",
+         period = "periodName") %>%
+  mutate(unemployment_rate = unemployment_rate/100)
+
+#NYC Monthly Labor Force Participation Rate:
+LFP_1 <- get_series_table("LASCT365100000000008", start_year=2005, end_year=2014)
+LFP_2 <- get_series_table("LASCT365100000000008", start_year=2015, end_year=2024)
+lfpr <- LFP_1 %>%
+  full_join (LFP_2) %>%
+  rename(LFP_rate = "value",
+         month = "period",
+         period = "periodName") %>%
+  mutate(LFP_rate = LFP_rate/100)
+
+#NYC Monthly Average Hourly Earnings for All Employees:
+AHE_1 <- get_series_table("SMU36935610500000003", start_year=2005, end_year=2014)
+AHE_2 <- get_series_table("SMU36935610500000003", start_year=2015, end_year=2024)
+AHE <- AHE_1 %>%
+  full_join (AHE_2) %>%
+  rename(avg_hr_earnings = "value",
+         month = "period",
+         period = "periodName")
+
+#NY-NJ-PA Consumer Price Index:
+CPI_1 <- get_series_table("CUURS12ASA0", start_year=2005, end_year=2014)
+CPI_2 <- get_series_table("CUURS12ASA0", start_year=2015, end_year=2024)
+CPI <- CPI_1 %>%
+  full_join (CPI_2) %>%
+  rename(CPI = "value",
+         month = "period",
+         period = "periodName")
+
+#Step 2: Combine all data frames into one consolidated economic data set; mutate and tidy data for relevant annual comparisons:
+ec_health <- unemployment %>%
+  full_join(lfpr) %>%
+  full_join(AHE) %>%
+  full_join(CPI)
+ec_health$month <- gsub("M","",ec_health$month)
+ec_health$month <- as.numeric(ec_health$month)
+ec_health$period <- paste0(ec_health$month,"-01-",ec_health$year)
+ec_health$period <- as.Date(ec_health$period, format = "%m-%d-%Y")
+ec_health <- ec_health[order(ec_health$period), ]
+
+ec_health <- ec_health %>%
+  filter(ec_health$month == 12)
+
+ec_health[is.na(ec_health)] <- 0
+ec_health$wage_growth <- (ec_health$avg_hr_earnings-lag(ec_health$avg_hr_earnings, n=1))/lag(ec_health$avg_hr_earnings, n=1)
+ec_health$inflation <- (ec_health$CPI-lag(ec_health$CPI, n=1))/lag(ec_health$CPI, n=1)
+ec_health[is.na(ec_health)] <- 0
+ec_health$wage_growth[is.infinite(ec_health$wage_growth)] <- 0
+
+#Step 3: Create an index utilizing each selected economic metric to determine a proxy for average consumer economic health:
+ec_health$ur_coeff <- (max(ec_health$unemployment_rate)-ec_health$unemployment_rate)*(1/(max(ec_health$unemployment_rate)-min(ec_health$unemployment_rate)))
+ec_health$lfp_coeff <- (ec_health$LFP_rate-min(ec_health$LFP_rate))*(1/(max(ec_health$LFP_rate)-min(ec_health$LFP_rate)))
+ec_health$wage_coeff <- (ec_health$wage_growth-min(ec_health$wage_growth[ec_health$wage_growth != 0])) * (1/(max(ec_health$wage_growth)-min(ec_health$wage_growth[ec_health$wage_growth != 0])))
+ec_health$wage_coeff[ec_health$wage_coeff < 0] <- 0
+ec_health$infl_coeff <- (max(ec_health$inflation)-ec_health$inflation)*(1/(max(ec_health$inflation)-min(ec_health$inflation[ec_health$inflation != 0])))
+ec_health <- ec_health %>%
+  filter(ec_health$year != 2005)
+
+ec_health$esi <- 1-(0.4*ec_health$ur_coeff+0.2*ec_health$lfp_coeff+0.2*ec_health$wage_coeff+0.2*ec_health$infl_coeff)
+nypd_data_ec <- nypd_data_percent %>%
+  select(c("Year","total"))
+nypd_data_ec <- nypd_data_ec[!duplicated(nypd_data_ec$Year), ]
+ec_health$year <- as.numeric(ec_health$year)
+ec_health <- ec_health %>%
+  rename(Year = "year") %>%
+  full_join(nypd_data_ec) %>%
+  rename(shootings = "total")
+ec_health$nypd_coeff <- 1-(max(ec_health$shootings)-ec_health$shootings)*(1/(max(ec_health$shootings)-min(ec_health$shootings)))
+
+#Step 4: Graph newly-created Economic Stress Index (ESI) against relative shootings:
+ec_health_chart <- ggplot(ec_health, aes(x = Year)) +
+  geom_line(aes(x = Year, y = nypd_coeff, color = "Shootings"), size = 2) +
+  theme(axis.title.y = element_blank()) +
+  labs(color = element_blank()) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 8)) +
+  scale_color_manual(values = c("Shootings" = "orangered3"))
+
+#Step 5: Compute statistics on model to determine relationship:
+lm_model <- lm(nypd_coeff ~ esi, data = ec_health)
+
+ec_health_chart
+summary(lm_model)
+```
+
+### **Conclusions & Limitations**
+After assessing the model and resulting regression analysis, we may conclude that there is some statistically-significant relationship between economic stress and gun violence. Not only can we visually see similar trends between shooting incidents and economic prosperity (i.e., there are peaks and troughs in shooting incidents roughly in line with peaks and troughs of economic stress), but the output of the linear regression model supports the hypothesis that there is some relationship between these variables. In particular:  
+
+*Significance level:* the p-value, which corresponds to the F-statistic, demonstrates whether the model fits the data better than a model with no predictors. A p-value less than some alpha significance level indicates whether there is enough evidence to reject the true null hypothesis (the hypothesis that there is no effect or no difference); in this case, the model implies high likelihood of statistical significance (alpha less than 0.01) between the two variables.  
+
+*Prediction ability:* the multiple R-squared statistic, or the coefficient of determination, tells us the portion of the variance in the dependent variable that can be eplained by the independent variable(s). This value always ranges between 0 and 1, and the closer to 1, the better the independent variable(s) are able to predict the dependent variable. In this case, our Multiple R-Squared statistic of ~0.62 indicates economic stress (independent variable) is a relatively strong predictor of shooting incidents (dependent variable).
+
+***Model Limitations***  
+While built using real economic data points, the created Economic Stress Index (ESI) is unique to this analysis and not broadly applied in economic studies. Data and weights (rate of importance) were selected per the author's knowledge and experience with economic data, and is therefore inherently biased towards indicators believed to be most relevant to one individual.  
+In this case, the unemployment rate was treated as 2x more important to indicating economic stress than each of the other three variables (which were set with equal importance to each other). Additionally, it would have been appropriate to include GDP as a measured proxy for periods of recession in order to make the model stronger, but such was not included here.  
+Furthermore, both the economic stress and shooting indices are relative, comparing only the years of interest (2006-2024) to determine high and low periods over this specific time frame, rather than longer-term trends; this inherently exaggerates the created indices and does not imply any particular relationship to the state of the New York economy over this time frame compared to any other time frame.
+
+
+
